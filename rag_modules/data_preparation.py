@@ -1,10 +1,12 @@
 import logging
 import hashlib
 import re
+import uuid
 from typing import List, Dict
 from pathlib import Path
 
 from langchain_core.documents import Document
+from langchain_text_splitters import MarkdownHeaderTextSplitter
 
 logger = logging.getLogger(__name__)
 
@@ -105,3 +107,68 @@ class DataPreparationModule:
     @classmethod
     def get_supported_difficulties(cls) -> List[str]:
         return cls.DIFFICULTY_LABELS
+
+    def chunk_documents(self) -> List[Document]:
+        logger.info(f"正在进行 Markdown 结构感知分块")
+
+        if not self.documents:
+            raise ValueError("请先加载文档")
+
+        chunks = self._markdown_header_split()
+
+        for i, chunk in enumerate(chunks):
+            if "chunk_id" not in chunk.metadata:
+                chunk.metadata["chunk_id"] = str(uuid.uuid4())
+            chunk.metadata["batch_index"] = i
+            chunk.metadata["chunk_size"] = len(chunk.page_content)
+
+        self.chunks = chunks
+        logger.info(f"Markdown 分块完成，共生成 {len(chunks)} 个 chunk")
+        return chunks
+
+    def _markdown_header_split(self) -> List[Document]:
+        headers_to_split_on = [
+            ("#", "主标题"),        # 菜品名称
+            ("##", "二级标题"),     # 必备原料、计算、操作等
+            ("###", "三级标题")     # 简易版本、复杂版本等
+        ]
+
+        markdown_splitter = MarkdownHeaderTextSplitter(
+            headers_to_split_on=headers_to_split_on,
+            strip_headers=False
+        )
+
+        all_chunks = []
+
+        for doc in self.documents:
+            try:
+                md_chunks = markdown_splitter.split_text(doc.page_content)
+
+                logger.debug(f"文档 {doc.metadata.get("dish_name", "未知")} 分割成 {len(md_chunks)} 个 chunk")
+
+                if len(md_chunks) <= 1:
+                    logger.warning(f"文档 {doc.metadata.get("dish_name", "未知")} 未能按标题分割，可能缺少标题结构")
+
+                parent_id = doc.metadata["parent_id"]
+
+                for i, chunk in enumerate(md_chunks):
+                    child_id = str(uuid.uuid4())
+
+                    chunk.metadata.update(doc.metadata)
+                    chunk.metadata.update({
+                        "chunk_id": child_id,
+                        "parent_id": parent_id,
+                        "doc_type": "child",
+                        "chunk_index": i
+                    })
+
+                    self.parent_child_map[child_id] = parent_id
+
+                all_chunks.extend(md_chunks)
+
+            except Exception as e:
+                logger.warning(f"文档 {doc.metadata.get("source", "未知")} Markdown 分割失败: {e}")
+                all_chunks.append(doc)
+
+        logger.info(f"Markdown 结构分割完成，生成 {len(all_chunks)} 个结构化块")
+        return all_chunks
