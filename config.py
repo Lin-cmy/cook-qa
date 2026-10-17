@@ -10,7 +10,7 @@ class RAGConfig:
     """RAG系统配置类"""
 
     # 路径配置
-    data_path: str = "./cook"
+    data_path: str = "./data/cook"
     index_save_path: str = "./vector_index"
 
     # 模型配置
