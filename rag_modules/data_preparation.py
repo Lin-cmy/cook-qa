@@ -63,7 +63,7 @@ class DataPreparationModule:
 
                 documents.append(doc)
     
-            except Exception:
+            except Exception as e:
                 logger.warning(f"读取文件 {md_file} 失败: {e}")
 
         for doc in documents:
