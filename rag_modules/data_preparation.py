@@ -46,7 +46,7 @@ class DataPreparationModule:
 
                 try:
                     data_root = Path(self.data_path).resolve()
-                    relative_path = Path(md_file).resolve().relative_to(data_root).as_posix
+                    relative_path = Path(md_file).resolve().relative_to(data_root).as_posix()
                 except Exception:
                     relative_path = Path(md_file).as_posix
 
