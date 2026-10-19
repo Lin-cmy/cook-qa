@@ -42,7 +42,7 @@ class RetrievalOptimizationModule:
         filtered_docs = []
         for doc in docs:
             match = True
-            for key, value in filter.items():
+            for key, value in filters.items():
                 if key in doc.metadata:
                     if isinstance(value, list):
                         if doc.metadata[key] not in value:
