@@ -20,7 +20,7 @@ class IndexConstructionModule:
         logger.info(f"正在初始化嵌入模型: {self.model_name}")
 
         self.embeddings = HuggingFaceEmbeddings(
-            modelname=self.model_name,
+            model_name=self.model_name,
             model_kwargs={"device": "cuda"},
             encode_kwargs={"normalize_embeddings": True}
         )
