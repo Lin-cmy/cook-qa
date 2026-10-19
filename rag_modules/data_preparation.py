@@ -2,7 +2,7 @@ import logging
 import hashlib
 import re
 import uuid
-from typing import List, Dict
+from typing import List, Dict, Any
 from pathlib import Path
 
 from langchain_core.documents import Document
