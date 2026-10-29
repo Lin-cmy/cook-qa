@@ -145,6 +145,10 @@ class RecipeRAGSystem:
         route_type = self.generation_module.query_router(question)
         print(f"🎯 查询类型: {route_type}")
 
+        # 1.5 领域拦截：非烹饪问题直接拒答，不进入检索与生成（省两次 LLM 调用）
+        if route_type == 'out_of_domain':
+            return "抱歉，我是菜谱助手，只能回答与烹饪、菜品、食材相关的问题。您可以问我菜品做法、食材搭配或食谱推荐。"
+
         # 2. 智能查询重写（根据路由类型）
         if route_type == 'list':
             # 列表查询保持原查询

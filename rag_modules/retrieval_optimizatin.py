@@ -49,7 +49,7 @@ class RetrievalOptimizationModule:
                             match = False
                             break
                     else:
-                        if doc.metadatap[key] != value:
+                        if doc.metadata[key] != value:
                             match = False
                             break
                 else:

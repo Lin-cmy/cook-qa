@@ -41,7 +41,8 @@ class GenerationIntegrationModule:
         prompt = ChatPromptTemplate.from_messages([
             ("system", """你是一位专业的烹饪助手。请根据以下食谱信息回答用户的问题。
 
-请提供详细、实用的回答。如果信息不足，请诚实说明。"""),
+请提供详细、实用的回答。如果信息不足，请诚实说明。
+回答必须严格基于提供的食谱信息，不得补充食谱中未出现的内容；无法确定的细节宁可省略，也不要猜测或编造。"""),
             ("human", """"用户问题: {question}
 
 相关食谱信息:
@@ -82,7 +83,8 @@ class GenerationIntegrationModule:
 - 根据实际内容灵活调整结构
 - 不要强行填充无关内容或重复制作步骤中的信息
 - 重点突出实用性和可操作性
-- 如果没有额外的技巧要分享，可以省略制作技巧部分"""),
+- 如果没有额外的技巧要分享，可以省略制作技巧部分
+- 回答必须严格基于提供的食谱信息，不得补充食谱中未出现的内容；无法确定的细节宁可省略，也不要猜测或编造"""),
             ("human", """用户问题: {question}
 
 相关食谱信息:
@@ -93,7 +95,7 @@ class GenerationIntegrationModule:
             {"question": RunnablePassthrough(), "context": lambda _: context}
             | prompt
             | self.llm
-            | StrOutputParser
+            | StrOutputParser()
         )
 
         response = chain.invoke(query)
@@ -150,18 +152,21 @@ class GenerationIntegrationModule:
 
     def query_router(self, query: str) -> str:
         prompt = ChatPromptTemplate.from_messages([
-            ("system", """根据用户的问题，将其分类为以下三种类型之一：
+            ("system", """根据用户的问题，将其分类为以下四种类型之一：
 
-1. 'list' - 用户想要获取菜品列表或推荐，只需要菜名
+1. 'out_of_domain' - 与烹饪、菜谱、食材完全无关的问题
+   例如：帮我写一段代码、今天股市怎么样、重庆大学的推免政策
+
+2. 'list' - 用户想要获取菜品列表或推荐，只需要菜名
    例如：推荐几个素菜、有什么川菜、给我3个简单的菜
 
-2. 'detail' - 用户想要具体的制作方法或详细信息
+3. 'detail' - 用户想要具体的制作方法或详细信息
    例如：宫保鸡丁怎么做、制作步骤、需要什么食材
 
-3. 'general' - 其他一般性问题
+4. 'general' - 其他一般性问题
    例如：什么是川菜、制作技巧、营养价值
 
-请只返回分类结果：list、detail 或 general"""),
+请只返回分类结果：list、detail、general 或 out_of_domain"""),
             ("human", """用户问题: {query}""")
         ])
 
@@ -174,7 +179,7 @@ class GenerationIntegrationModule:
 
         result = chain.invoke(query).strip().lower()
 
-        if result in ["list", "detail", "general"]:
+        if result in ["list", "detail", "general", "out_of_domain"]:
             return result
         else:
             return "general"
@@ -202,7 +207,8 @@ class GenerationIntegrationModule:
         prompt = ChatPromptTemplate.from_messages([
             ("system", """你是一位专业的烹饪助手。请根据以下食谱信息回答用户的问题。
 
-请提供详细、实用的回答。如果信息不足，请诚实说明。"""),
+请提供详细、实用的回答。如果信息不足，请诚实说明。
+回答必须严格基于提供的食谱信息，不得补充食谱中未出现的内容；无法确定的细节宁可省略，也不要猜测或编造。"""),
             ("human", """用户问题: {question}
 
 相关食谱信息:
@@ -243,7 +249,8 @@ class GenerationIntegrationModule:
 - 根据实际内容灵活调整结构
 - 不要强行填充无关内容或重复制作步骤中的信息
 - 重点突出实用性和可操作性
-- 如果没有额外的技巧要分享，可以省略制作技巧部分"""),
+- 如果没有额外的技巧要分享，可以省略制作技巧部分
+- 回答必须严格基于提供的食谱信息，不得补充食谱中未出现的内容；无法确定的细节宁可省略，也不要猜测或编造"""),
             ("human", """用户问题: {question}
 
 相关食谱信息:
