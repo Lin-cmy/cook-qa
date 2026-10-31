@@ -1,0 +1,7 @@
+.git
+__pycache__
+*.pyc
+.env
+vector_index/
+ragas_results*.csv
+eval_ragas.py
