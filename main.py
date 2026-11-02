@@ -58,8 +58,14 @@ class RAGResult:
     contexts: List[str] = field(default_factory=list)       # 父文档正文，直接喂给 RAGAs
     answer: Any = ""                                        # stream=True 时是生成器
     intercepted: bool = False            # 是否被前置拦截（未进检索与生成）
+    stream: bool = False                 # 是否流式生成
     llm_calls: int = 0                   # 本次消耗的 LLM 调用次数（成本代理指标）
-    latency_ms: int = 0                  # 端到端耗时；stream=True 时为到首个 chunk 的时间
+    # 延迟拆成两个指标，因为它们回答的是两个不同问题：
+    #   ttft_ms   —— 用户多久看到第一个字（决定"感觉快不快"），只有流式模式有值；
+    #   latency_ms—— 整条链路多久跑完（决定"多久能读完"），流式模式下要等生成器消费完才有值（0 表示未消费完）。
+    # 只报一个总时长会掩盖"首字很快但生成很慢"和"憋很久才吐字"这两种完全不同的体验。
+    ttft_ms: int = 0
+    latency_ms: int = 0
 
 
 class RecipeRAGSystem:
@@ -167,7 +173,8 @@ class RecipeRAGSystem:
 
         Args:
             question: 用户问题
-            stream: 是否流式生成（此时 answer 是生成器，latency_ms 记首 chunk 时间）
+            stream: 是否流式生成（此时 answer 是生成器；ttft_ms 在首个 chunk 到达时写入，
+                latency_ms 在生成器消费完后写入，未消费完为 0）
             verbose: 是否打印过程日志（评测时关掉）
 
         Returns:
@@ -177,7 +184,7 @@ class RecipeRAGSystem:
             raise ValueError("请先构建知识库")
 
         t0 = time.perf_counter()
-        result = RAGResult(question=question)
+        result = RAGResult(question=question, stream=stream)
 
         if verbose:
             print(f"\n❓ 用户问题: {question}")
@@ -193,6 +200,7 @@ class RecipeRAGSystem:
             result.intercepted = True
             result.answer = OUT_OF_DOMAIN_REPLY
             result.latency_ms = int((time.perf_counter() - t0) * 1000)
+            result.ttft_ms = result.latency_ms
             return result
 
         # 2. 查询重写（列表查询保持原样，省 1 次调用）
@@ -223,6 +231,7 @@ class RecipeRAGSystem:
         if not result.child_chunks:
             result.answer = "抱歉，没有找到相关的食谱信息。请尝试其他菜品名称或关键词。"
             result.latency_ms = int((time.perf_counter() - t0) * 1000)
+            result.ttft_ms = result.latency_ms
             return result
 
         # 5. 子块 -> 父文档（小粒度检索保精度，大粒度上下文保完整）
@@ -241,8 +250,11 @@ class RecipeRAGSystem:
                 if result.route_type == "detail"
                 else self.generation_module.generate_basic_answer_stream(question, result.parent_docs)
             )
-            result.answer = generator
-            result.latency_ms = int((time.perf_counter() - t0) * 1000)
+            # 生成器是惰性的：此刻还没有发出请求，读 latency_ms 只会得到
+            # "创建生成器花了多久"，与用户感知的延迟无关。
+            # 因此这里不写延迟，交给包装器在真正拿到 chunk 时记录。
+            result.answer = self._instrument_stream(generator, result, t0)
+            result.llm_calls += 1
             return result
         else:
             result.answer = (
@@ -250,16 +262,42 @@ class RecipeRAGSystem:
                 if result.route_type == "detail"
                 else self.generation_module.generate_basic_answer(question, result.parent_docs)
             )
-        result.llm_calls += 1
+            # 只有真正调了生成模型才计数。list 路由是纯字符串拼装，
+            # 之前这里的无条件 +1 会让它凭空多出一次调用，成本账就算错了。
+            result.llm_calls += 1
         result.latency_ms = int((time.perf_counter() - t0) * 1000)
+        result.ttft_ms = result.latency_ms      # 非流式：答案一次性返回，首字即全部
         return result
+
+    @staticmethod
+    def _instrument_stream(generator, result: RAGResult, t0: float):
+        """给流式生成器套一层埋点：首个 chunk 记 TTFT，消费完记端到端耗时。
+
+        必须包在生成器外面而不是在 run_query 里读时间，因为流式调用是惰性的——
+        真正耗时发生在 for chunk in ... 时，那时 run_query 早就返回了。
+        """
+        got_first = False
+        try:
+            for chunk in generator:
+                if not got_first:
+                    result.ttft_ms = int((time.perf_counter() - t0) * 1000)
+                    got_first = True
+                yield chunk
+        finally:
+            # 放在 finally：调用方中途 break 时也要留下已发生的时间，
+            # 否则半途中断的请求会以 latency_ms=0 污染延迟统计。
+            elapsed = int((time.perf_counter() - t0) * 1000)
+            if not got_first:
+                # 一个 chunk 都没有（上游返回空/报错）：TTFT 记总耗时，
+                # 避免用 0 把长耗时藏起来。
+                result.ttft_ms = elapsed
+            result.latency_ms = elapsed
 
     def ask_question(self, question: str, stream: bool = False):
         """兼容旧接口：只返回答案字符串。
 
         需要检索上下文 / 路由结果 / 延迟时请用 run_query()。
-        注意 stream=True 时返回值是生成器，此时 RAGResult.answer 也是生成器。
-        """
+        注意 stream=True 时返回值是生成器，此时 RAGResult.answer 也是生成器。"""
         result = self.run_query(question, stream=stream)
         return result.answer
 
