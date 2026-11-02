@@ -1,3 +1,4 @@
+import os
 import logging
 from typing import List
 from pathlib import Path
@@ -21,7 +22,7 @@ class IndexConstructionModule:
 
         self.embeddings = HuggingFaceEmbeddings(
             model_name=self.model_name,
-            model_kwargs={"device": "cuda"},
+            model_kwargs={"device": os.getenv("EMBEDDING_DEVICE", "cpu")},
             encode_kwargs={"normalize_embeddings": True}
         )
 
@@ -54,6 +55,7 @@ class IndexConstructionModule:
             raise ValueError("请先构建向量索引")
 
         Path(self.index_save_path).mkdir(parents=True, exist_ok=True)
+        self.vectorstore.save_local(self.index_save_path)
         logger.info(f"向量索引已保存到: {self.index_save_path}")
 
     def load_index(self):
