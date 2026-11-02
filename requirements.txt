@@ -14,3 +14,8 @@ python-dotenv>=1.0.0
 langchain-openai<1.0
 fastapi>=0.115
 uvicorn
+
+# 评测依赖（eval_ragas.py / eval_routing.py）——此前缺失，导致镜像内跑不了评测
+ragas==0.2.15
+datasets==5.1.0
+pandas>=2.0.0

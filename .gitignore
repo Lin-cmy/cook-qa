@@ -1,0 +1,18 @@
+# 密钥
+.env
+.env.*
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 构建产物：索引由 build_knowledge_base() 生成，不入库
+vector_index/
+
+# 评测与运行日志
+*.log
+.local_index/
