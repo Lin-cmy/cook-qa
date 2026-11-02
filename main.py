@@ -4,8 +4,11 @@ RAG系统主程序
 
 import os
 import sys
+import time
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Dict, List
 
 # 添加模块路径
 sys.path.append(str(Path(__file__).parent))
@@ -28,6 +31,36 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# 库外问题统一拒答话术。抽成常量是为了让评测能断言"是否命中拦截"，
+# 而不是靠 LLM 判分去猜这句回答"算不算拒答"。
+OUT_OF_DOMAIN_REPLY = (
+    "抱歉，我是菜谱助手，只能回答与烹饪、菜品、食材相关的问题。"
+    "您可以问我菜品做法、食材搭配或食谱推荐。"
+)
+
+
+@dataclass
+class RAGResult:
+    """一次问答的完整结构化结果。
+
+    为什么要有这个类：评测脚本此前把 ask_question 的链路复制了一遍，
+    于是"服务实际走的路径"和"评测走的路径"会各自漂移（库外拦截就是这样没被评到的）。
+    把链路收敛到 run_query 一处，评测/API/埋点都消费这个对象，就不会再漂。
+    """
+
+    question: str
+    route_type: str = "general"          # out_of_domain / list / detail / general
+    rewritten_query: str = ""
+    filters: Dict[str, Any] = field(default_factory=dict)
+    child_chunks: List[Any] = field(default_factory=list)   # 命中的子块
+    parent_docs: List[Any] = field(default_factory=list)    # 回取的父文档（生成上下文）
+    contexts: List[str] = field(default_factory=list)       # 父文档正文，直接喂给 RAGAs
+    answer: Any = ""                                        # stream=True 时是生成器
+    intercepted: bool = False            # 是否被前置拦截（未进检索与生成）
+    llm_calls: int = 0                   # 本次消耗的 LLM 调用次数（成本代理指标）
+    latency_ms: int = 0                  # 端到端耗时；stream=True 时为到首个 chunk 的时间
+
 
 class RecipeRAGSystem:
     """食谱RAG系统主类"""
@@ -125,120 +158,111 @@ class RecipeRAGSystem:
 
         print("✅ 知识库构建完成！")
     
-    def ask_question(self, question: str, stream: bool = False):
-        """
-        回答用户问题
+    def run_query(self, question: str, stream: bool = False, verbose: bool = True) -> RAGResult:
+        """走完一次问答的完整链路，返回结构化结果。
+
+        这是链路的唯一真相来源：ask_question()、评测脚本、API 都调它。
+        评测要 contexts 就取 result.contexts，要延迟就取 result.latency_ms，
+        不必再自己重写一遍"路由→重写→检索→生成"（重写就是评测口径漂移的根源）。
 
         Args:
             question: 用户问题
-            stream: 是否使用流式输出
+            stream: 是否流式生成（此时 answer 是生成器，latency_ms 记首 chunk 时间）
+            verbose: 是否打印过程日志（评测时关掉）
 
         Returns:
-            生成的回答或生成器
+            RAGResult
         """
         if not all([self.retrieval_module, self.generation_module]):
             raise ValueError("请先构建知识库")
-        
-        print(f"\n❓ 用户问题: {question}")
 
-        # 1. 查询路由
-        route_type = self.generation_module.query_router(question)
-        print(f"🎯 查询类型: {route_type}")
+        t0 = time.perf_counter()
+        result = RAGResult(question=question)
 
-        # 1.5 领域拦截：非烹饪问题直接拒答，不进入检索与生成（省两次 LLM 调用）
-        if route_type == 'out_of_domain':
-            return "抱歉，我是菜谱助手，只能回答与烹饪、菜品、食材相关的问题。您可以问我菜品做法、食材搭配或食谱推荐。"
+        if verbose:
+            print(f"\n❓ 用户问题: {question}")
 
-        # 2. 智能查询重写（根据路由类型）
-        if route_type == 'list':
-            # 列表查询保持原查询
-            rewritten_query = question
-            print(f"📝 列表查询保持原样: {question}")
+        # 1. 路由（1 次 LLM 调用）
+        result.route_type = self.generation_module.query_router(question)
+        result.llm_calls = 1
+        if verbose:
+            print(f"🎯 查询类型: {result.route_type}")
+
+        # 1.5 领域拦截：非烹饪问题直接拒答，不进检索与生成（省 2 次 LLM 调用）
+        if result.route_type == "out_of_domain":
+            result.intercepted = True
+            result.answer = OUT_OF_DOMAIN_REPLY
+            result.latency_ms = int((time.perf_counter() - t0) * 1000)
+            return result
+
+        # 2. 查询重写（列表查询保持原样，省 1 次调用）
+        if result.route_type == "list":
+            result.rewritten_query = question
+            if verbose:
+                print(f"📝 列表查询保持原样: {question}")
         else:
-            # 详细查询和一般查询使用智能重写
-            print("🤖 智能分析查询...")
-            rewritten_query = self.generation_module.query_rewrite(question)
-        
-        # 3. 检索相关子块（自动应用元数据过滤）
-        print("🔍 检索相关文档...")
-        filters = self._extract_filters_from_query(question)
-        if filters:
-            print(f"应用过滤条件: {filters}")
-            relevant_chunks = self.retrieval_module.metadata_filtered_search(rewritten_query, filters, top_k=self.config.top_k)
+            if verbose:
+                print("🤖 智能分析查询...")
+            result.rewritten_query = self.generation_module.query_rewrite(question)
+            result.llm_calls += 1
+
+        # 3. 检索（有元数据约束走过滤检索，否则混合召回）
+        result.filters = self._extract_filters_from_query(question)
+        if result.filters:
+            if verbose:
+                print(f"应用过滤条件: {result.filters}")
+            result.child_chunks = self.retrieval_module.metadata_filtered_search(
+                result.rewritten_query, result.filters, top_k=self.config.top_k
+            )
         else:
-            relevant_chunks = self.retrieval_module.hybrid_search(rewritten_query, top_k=self.config.top_k)
+            result.child_chunks = self.retrieval_module.hybrid_search(
+                result.rewritten_query, top_k=self.config.top_k
+            )
 
-        # 显示检索到的子块信息
-        if relevant_chunks:
-            chunk_info = []
-            for chunk in relevant_chunks:
-                dish_name = chunk.metadata.get('dish_name', '未知菜品')
-                # 尝试从内容中提取章节标题
-                content_preview = chunk.page_content[:100].strip()
-                if content_preview.startswith('#'):
-                    # 如果是标题开头，提取标题（仅取第一行）
-                    title_end = content_preview.find('\n') if '\n' in content_preview else len(content_preview)
-                    section_title = content_preview[:title_end].replace('#', '').strip()
-                    chunk_info.append(f"{dish_name}({section_title})")
-                else:
-                    chunk_info.append(f"{dish_name}(内容片段)")
+        # 4. 检索为空：生成层兜底
+        if not result.child_chunks:
+            result.answer = "抱歉，没有找到相关的食谱信息。请尝试其他菜品名称或关键词。"
+            result.latency_ms = int((time.perf_counter() - t0) * 1000)
+            return result
 
-            print(f"找到 {len(relevant_chunks)} 个相关文档块: {', '.join(chunk_info)}")
+        # 5. 子块 -> 父文档（小粒度检索保精度，大粒度上下文保完整）
+        result.parent_docs = self.data_module.get_parent_documents(result.child_chunks)
+        result.contexts = [doc.page_content for doc in result.parent_docs]
+        if verbose:
+            names = [doc.metadata.get("dish_name", "未知菜品") for doc in result.parent_docs]
+            print(f"找到 {len(result.child_chunks)} 个子块，回取 {len(result.parent_docs)} 篇菜谱: {', '.join(names)}")
+
+        # 6. 生成（list 分支是纯字符串拼装，不消耗 LLM 调用）
+        if result.route_type == "list":
+            result.answer = self.generation_module.generate_list_answer(question, result.parent_docs)
+        elif stream:
+            generator = (
+                self.generation_module.generate_step_by_step_answer_stream(question, result.parent_docs)
+                if result.route_type == "detail"
+                else self.generation_module.generate_basic_answer_stream(question, result.parent_docs)
+            )
+            result.answer = generator
+            result.latency_ms = int((time.perf_counter() - t0) * 1000)
+            return result
         else:
-            print(f"找到 {len(relevant_chunks)} 个相关文档块")
+            result.answer = (
+                self.generation_module.generate_step_by_step_answer(question, result.parent_docs)
+                if result.route_type == "detail"
+                else self.generation_module.generate_basic_answer(question, result.parent_docs)
+            )
+        result.llm_calls += 1
+        result.latency_ms = int((time.perf_counter() - t0) * 1000)
+        return result
 
-        # 4. 检查是否找到相关内容
-        if not relevant_chunks:
-            return "抱歉，没有找到相关的食谱信息。请尝试其他菜品名称或关键词。"
+    def ask_question(self, question: str, stream: bool = False):
+        """兼容旧接口：只返回答案字符串。
 
-        # 5. 根据路由类型选择回答方式
-        if route_type == 'list':
-            # 列表查询：直接返回菜品名称列表
-            print("📋 生成菜品列表...")
-            relevant_docs = self.data_module.get_parent_documents(relevant_chunks)
+        需要检索上下文 / 路由结果 / 延迟时请用 run_query()。
+        注意 stream=True 时返回值是生成器，此时 RAGResult.answer 也是生成器。
+        """
+        result = self.run_query(question, stream=stream)
+        return result.answer
 
-            # 显示找到的文档名称
-            doc_names = []
-            for doc in relevant_docs:
-                dish_name = doc.metadata.get('dish_name', '未知菜品')
-                doc_names.append(dish_name)
-
-            if doc_names:
-                print(f"找到文档: {', '.join(doc_names)}")
-
-            return self.generation_module.generate_list_answer(question, relevant_docs)
-        else:
-            # 详细查询：获取完整文档并生成详细回答
-            print("获取完整文档...")
-            relevant_docs = self.data_module.get_parent_documents(relevant_chunks)
-
-            # 显示找到的文档名称
-            doc_names = []
-            for doc in relevant_docs:
-                dish_name = doc.metadata.get('dish_name', '未知菜品')
-                doc_names.append(dish_name)
-
-            if doc_names:
-                print(f"找到文档: {', '.join(doc_names)}")
-            else:
-                print(f"对应 {len(relevant_docs)} 个完整文档")
-
-            print("✍️ 生成详细回答...")
-
-            # 根据路由类型自动选择回答模式
-            if route_type == "detail":
-                # 详细查询使用分步指导模式
-                if stream:
-                    return self.generation_module.generate_step_by_step_answer_stream(question, relevant_docs)
-                else:
-                    return self.generation_module.generate_step_by_step_answer(question, relevant_docs)
-            else:
-                # 一般查询使用基础回答模式
-                if stream:
-                    return self.generation_module.generate_basic_answer_stream(question, relevant_docs)
-                else:
-                    return self.generation_module.generate_basic_answer(question, relevant_docs)
-    
     def _extract_filters_from_query(self, query: str) -> dict:
         """
         从用户问题中提取元数据过滤条件
